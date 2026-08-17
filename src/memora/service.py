@@ -6,6 +6,7 @@ from memora.encoders.clip_encoder import VisionEncoder
 from memora.indexer import index_directory
 from memora.models import EventGroup, PhotoRecord, SearchResult, SimilarGroup
 from memora.retrieval.brute_force import search
+from memora.retrieval.metadata_filter import GeoBounds, build_search_plan, filter_records
 from memora.retrieval.query_expansion import QueryStrategy, encode_query
 from memora.retrieval.vector_store import NumpyVectorStore
 
@@ -32,9 +33,34 @@ class MemoraService:
         top_k: int = 20,
         min_score: float | None = None,
         strategy: QueryStrategy = "query_enhancement",
+        captured_from: str | None = None,
+        captured_to: str | None = None,
+        bounds: GeoBounds | None = None,
+        fallback_if_unavailable: bool = False,
+        reference_date: str | None = None,
     ) -> list[SearchResult]:
-        query_vector = encode_query(self.encoder, query, strategy)
-        return search(self.records, query_vector, top_k=top_k, min_score=min_score)
+        plan = build_search_plan(
+            query,
+            captured_from=captured_from,
+            captured_to=captured_to,
+            bounds=bounds,
+            reference_date=reference_date,
+        )
+        candidates, _ = filter_records(self.records, plan.metadata_filter, fallback_if_unavailable=fallback_if_unavailable)
+        query_vector = encode_query(self.encoder, plan.semantic_query, strategy)
+        return search(candidates, query_vector, top_k=top_k, min_score=min_score)
+
+    def search_details(self, query: str, top_k: int = 20, min_score: float | None = None, strategy: QueryStrategy = "query_enhancement", *, captured_from: str | None = None, captured_to: str | None = None, bounds: GeoBounds | None = None, fallback_if_unavailable: bool = False, reference_date: str | None = None) -> dict:
+        plan = build_search_plan(query, captured_from=captured_from, captured_to=captured_to, bounds=bounds, reference_date=reference_date)
+        candidates, fallback = filter_records(self.records, plan.metadata_filter, fallback_if_unavailable=fallback_if_unavailable)
+        results = search(candidates, encode_query(self.encoder, plan.semantic_query, strategy), top_k=top_k, min_score=min_score)
+        return {
+            "plan": plan.to_dict(),
+            "total_count": len(self.records),
+            "candidate_count": len(candidates),
+            "metadata_fallback": fallback,
+            "results": [result.__dict__ for result in results],
+        }
 
     def events(self, **kwargs: float) -> list[EventGroup]:
         return cluster_events(self.records, **kwargs)

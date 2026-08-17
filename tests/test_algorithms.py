@@ -4,14 +4,17 @@ import numpy as np
 from PIL import Image
 
 from memora.clustering.event_cluster import cluster_events
+from memora.clustering.people import PeopleIndex, _build_groups, apply_feedback
 from memora.duplicate.phash import hamming_distance, phash
 from memora.encoders.clip_encoder import HashImageEncoder
 from memora.evaluation.clustering import pairwise_f1
 from memora.evaluation.retrieval import RetrievalCase, evaluate_strategies, recall_at_k
-from memora.models import PhotoRecord
+from memora.models import FaceRecord, PersonGroup, PhotoRecord
 from memora.quality.best_shot import score_photo
 from memora.retrieval.brute_force import search
+from memora.retrieval.metadata_filter import GeoBounds, build_search_plan, filter_records
 from memora.retrieval.query_expansion import expand_query, query_texts
+from scripts.prepare_dataset import prepare_dataset
 
 
 def make_record(identifier: str, timestamp: datetime, vector: list[float]) -> PhotoRecord:
@@ -70,3 +73,80 @@ def test_recall_and_strategy_evaluation():
     metrics = evaluate_strategies(eval_records, HashImageEncoder(), [RetrievalCase("dog", frozenset({"a"}))], ks=(1, 5, 10))
     assert set(metrics) == {"raw_clip", "prompt_ensemble", "query_enhancement"}
     assert set(metrics["raw_clip"]) == {"recall@1", "recall@5", "recall@10"}
+
+
+def test_prepare_dataset_converts_jpeg_and_writes_manifest(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "prepared"
+    source.mkdir()
+    Image.new("RGB", (20, 20), "blue").save(source / "original.jpg")
+
+    payload = prepare_dataset(source, output, tmp_path / "manifest.json")
+
+    assert payload["count"] == 1
+    assert (output / "000001.jpg").exists()
+    assert payload["records"][0]["metadata_preserved"] is True
+
+
+def test_metadata_plan_extracts_year_and_filters_untrusted_time():
+    records = [
+        PhotoRecord("exif", "exif.jpg", captured_at="2025-06-01T12:00:00", captured_at_source="exif"),
+        PhotoRecord("filesystem", "filesystem.jpg", captured_at="2025-06-01T12:00:00", captured_at_source="filesystem"),
+    ]
+    plan = build_search_plan("去年在海边拍的照片", reference_date="2026-08-17")
+    assert plan.semantic_query == "海边"
+    filtered, fallback = filter_records(records, plan.metadata_filter)
+    assert [record.id for record in filtered] == ["exif"]
+    assert fallback is False
+
+
+def test_metadata_filter_supports_gps_bbox_and_missing_metadata_fallback():
+    records = [
+        PhotoRecord("inside", "inside.jpg", latitude=30.5, longitude=120.5, gps_source="exif"),
+        PhotoRecord("outside", "outside.jpg", latitude=31.5, longitude=121.5, gps_source="exif"),
+    ]
+    metadata_filter = build_search_plan("海边", bounds=GeoBounds(30.0, 120.0, 31.0, 121.0)).metadata_filter
+    filtered, fallback = filter_records(records, metadata_filter)
+    assert [record.id for record in filtered] == ["inside"]
+    assert fallback is False
+
+    no_gps = [PhotoRecord("unknown", "unknown.jpg")]
+    filtered, fallback = filter_records(no_gps, metadata_filter, fallback_if_unavailable=True)
+    assert [record.id for record in filtered] == ["unknown"]
+    assert fallback is True
+
+
+def test_people_clustering_builds_prototypes_and_noise():
+    faces = [
+        FaceRecord("a", "photo-a", embedding=[1.0, 0.0], det_score=0.99),
+        FaceRecord("b", "photo-b", embedding=[0.99, 0.01], det_score=0.90),
+        FaceRecord("c", "photo-c", embedding=[0.0, 1.0], det_score=0.95),
+        FaceRecord("d", "photo-d", embedding=[0.01, 0.99], det_score=0.80),
+        FaceRecord("noise", "photo-noise", embedding=[-1.0, 0.0], det_score=0.50),
+    ]
+    groups, noise = _build_groups(faces, eps=0.05, min_samples=2)
+    assert len(groups) == 2
+    assert noise == ["noise"]
+    assert all(np.isclose(np.linalg.norm(group.prototype), 1.0) for group in groups)
+
+
+def test_people_feedback_merges_groups_and_removes_photo():
+    index = PeopleIndex(
+        faces=[
+            FaceRecord("f3", "photo-3", embedding=[1.0, 0.0], det_score=1.0),
+            FaceRecord("f7", "photo-7", embedding=[0.0, 1.0], det_score=1.0),
+        ],
+        groups=[
+            PersonGroup(3, ["f3"], ["photo-3"], [1.0, 0.0]),
+            PersonGroup(7, ["f7"], ["photo-7"], [0.0, 1.0]),
+        ],
+    )
+    updated = apply_feedback(
+        index,
+        merges=[[3, 7]],
+        removed_photos=[{"person_id": 3, "photo_id": "photo-7"}],
+    )
+    assert [group.id for group in updated.groups] == [3]
+    assert updated.groups[0].photo_ids == ["photo-3"]
+    assert updated.groups[0].face_ids == ["f3"]
+    assert updated.groups[0].removed_photo_ids == ["photo-7"]

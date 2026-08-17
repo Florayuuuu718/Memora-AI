@@ -48,20 +48,30 @@ def _timestamp(value: Any) -> str | None:
 def read_metadata(path: str | Path) -> dict[str, Any]:
     """Read portable EXIF fields using Pillow, with filesystem mtime fallback."""
     path = Path(path)
-    result: dict[str, Any] = {"path": str(path.resolve()), "captured_at": None}
+    result: dict[str, Any] = {
+        "path": str(path.resolve()),
+        "captured_at": None,
+        "captured_at_source": None,
+        "gps_source": None,
+    }
     try:
         with Image.open(path) as image:
             result["width"], result["height"] = image.size
             exif = image.getexif()
             tags = {ExifTags.TAGS.get(key, key): value for key, value in exif.items()}
             result["captured_at"] = _timestamp(tags.get("DateTimeOriginal") or tags.get("DateTime"))
+            if result["captured_at"]:
+                result["captured_at_source"] = "exif"
             result["camera"] = " ".join(str(tags.get(k, "")).strip() for k in ("Make", "Model")).strip() or None
             gps = exif.get_ifd(_TAGS.get("GPSInfo", 34853)) if exif else {}
             result["latitude"] = _gps_coordinate(_gps_value(gps, "GPSLatitude"), _gps_value(gps, "GPSLatitudeRef"))
             result["longitude"] = _gps_coordinate(_gps_value(gps, "GPSLongitude"), _gps_value(gps, "GPSLongitudeRef"))
+            if result["latitude"] is not None and result["longitude"] is not None:
+                result["gps_source"] = "exif"
     except (OSError, ValueError, KeyError, AttributeError):
         result["width"] = result["height"] = 0
         result["camera"] = None
     if not result.get("captured_at"):
         result["captured_at"] = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+        result["captured_at_source"] = "filesystem"
     return result

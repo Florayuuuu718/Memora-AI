@@ -11,3 +11,9 @@ data/embeddings.npy
 data/*.db
 .env
 
+# Private local photo datasets. These must never be committed.
+/photos/
+/photos_prepared/
+
+# Local indexes, manifests and evaluation labels generated from private photos.
+/data/*.json

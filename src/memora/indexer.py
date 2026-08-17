@@ -7,8 +7,7 @@ from memora.metadata.exif import read_metadata
 from memora.models import PhotoRecord
 from memora.quality.best_shot import score_photo
 
-
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 
 
 def iter_images(directory: str | Path) -> list[Path]:
@@ -31,8 +30,10 @@ def index_directory(directory: str | Path, encoder: VisionEncoder, existing: dic
         record.width = int(metadata.get("width", 0))
         record.height = int(metadata.get("height", 0))
         record.captured_at = metadata.get("captured_at")
+        record.captured_at_source = metadata.get("captured_at_source")
         record.latitude = metadata.get("latitude")
         record.longitude = metadata.get("longitude")
+        record.gps_source = metadata.get("gps_source")
         record.camera = metadata.get("camera")
         record.embedding = encoder.encode_image(path).tolist()
         record.phash = phash(path)

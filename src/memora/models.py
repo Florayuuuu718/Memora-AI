@@ -10,8 +10,10 @@ class PhotoRecord:
     width: int = 0
     height: int = 0
     captured_at: str | None = None
+    captured_at_source: str | None = None
     latitude: float | None = None
     longitude: float | None = None
+    gps_source: str | None = None
     camera: str | None = None
     embedding: list[float] = field(default_factory=list)
     phash: str | None = None
@@ -58,3 +60,20 @@ class SimilarGroup:
     photo_ids: list[str]
     representative_id: str | None = None
 
+
+@dataclass
+class FaceRecord:
+    id: str
+    photo_id: str
+    bbox: list[float] = field(default_factory=list)
+    embedding: list[float] = field(default_factory=list)
+    det_score: float = 0.0
+
+
+@dataclass
+class PersonGroup:
+    id: int
+    face_ids: list[str] = field(default_factory=list)
+    photo_ids: list[str] = field(default_factory=list)
+    prototype: list[float] = field(default_factory=list)
+    removed_photo_ids: list[str] = field(default_factory=list)

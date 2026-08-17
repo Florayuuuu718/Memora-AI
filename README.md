@@ -15,13 +15,26 @@ The project focuses on the parts that are useful for an image-algorithm portfoli
 - pluggable OpenCLIP, InsightFace and Qdrant integrations;
 - reproducible evaluation and brute-force baselines.
 
+## Private test data
+
+This repository does not contain the developer's private test photos. The
+local `photos/` source dataset and `photos_prepared/` normalized JPEG dataset
+are ignored by Git. Generated indexes, manifests, people clusters and
+evaluation JSON files under `data/` are also local-only because they may
+contain private paths, metadata or embeddings.
+
+To run the experiments locally, place your own images in `photos/`, prepare
+them into `photos_prepared/`, and build the indexes locally. In the future,
+production users will provide photos through the application upload/API
+interface rather than through files committed to this repository.
+
 ## Quick start
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev,vision]"
-memora index .\photos --index-path .\data\index.json
+memora index .\photos_prepared --index-path .\data\index.json
 memora search "a beach" --index-path .\data\index.json
 uvicorn memora.api.main:app --reload
 ```
@@ -58,11 +71,25 @@ Verify the runtime before indexing:
 python -c "import torch, open_clip; print(torch.__version__); print(torch.cuda.is_available()); print('open_clip ok')"
 ```
 
+If the source photo directory contains HEIC/HEIF files, install the separate
+preprocessing extra. The runtime indexer intentionally handles only the
+normalized JPEG dataset:
+
+```powershell
+pip install -e ".[preprocess]"
+```
+
+Then convert the source dataset without overwriting the originals:
+
+```powershell
+python scripts/prepare_dataset.py .\photos --output .\photos_prepared
+```
+
 OpenCLIP embeddings are model-specific, so rebuild the index after switching
 encoders:
 
 ```powershell
-memora index .\photos --index-path .\data\index-openclip.json --encoder open_clip
+memora index .\photos_prepared --index-path .\data\index-openclip.json --encoder open_clip
 memora search "海边" --index-path .\data\index-openclip.json --encoder open_clip --strategy query_enhancement
 ```
 
@@ -87,6 +114,74 @@ python scripts/evaluate_retrieval.py data/retrieval_cases.json --index-path data
 The current single-query experiment and its interpretation are recorded in
 [`docs/stage1_openclip_experiment.md`](docs/stage1_openclip_experiment.md).
 
+The three-group experiment is recorded in
+[`docs/stage1_three_group_experiment.md`](docs/stage1_three_group_experiment.md).
+
+## Stage 2: semantic search with metadata filters
+
+The search service now separates a natural-language query into a semantic
+part and metadata constraints. Relative time expressions such as `last year`,
+`this year`, `去年` and `今年` become capture-time filters. Explicit date
+ranges and GPS bounding boxes can also be supplied directly.
+
+```powershell
+memora search "last year beach photos" `
+  --index-path data/index-openclip-prepared.json `
+  --encoder open_clip `
+  --reference-date 2026-08-17
+```
+
+GPS filtering uses `MIN_LAT MIN_LON MAX_LAT MAX_LON` and only trusts EXIF GPS
+by default:
+
+```powershell
+memora search "beach photos" `
+  --index-path data/index-openclip-prepared.json `
+  --encoder open_clip `
+  --bbox 30.0 120.0 31.0 121.0
+```
+
+The same request is available through `POST /search` with `captured_from`,
+`captured_to`, `bbox`, `reference_date` and
+`fallback_if_unavailable`. Strict filtering is the default. The fallback flag
+is useful for an old dataset where the requested metadata field is absent in
+the entire index; it does not silently keep photos when only some records are
+missing metadata.
+
+阶段 2 测试记录见
+[`docs/stage2_metadata_filter_test.md`](docs/stage2_metadata_filter_test.md)。
+
+## Stage 3: InsightFace people clustering
+
+People clustering is an optional model path. Install it after the normalized
+JPEG dataset and CLIP index are ready:
+
+```powershell
+pip install -e ".[people]"
+python scripts/cluster_people.py `
+  --index-path data/index-openclip-prepared.json `
+  --people-path data/people.json `
+  --ctx-id 0
+```
+
+The pipeline is `InsightFace -> face embedding -> DBSCAN ->
+quality-weighted person prototype`. Use `--ctx-id -1` for CPU. The first
+InsightFace run may download the `buffalo_l` model files.
+
+Apply manual corrections to the saved index:
+
+```powershell
+python scripts/people_feedback.py --people-path data/people.json --merge 3 7
+python scripts/people_feedback.py --people-path data/people.json --remove 2 PHOTO_ID
+```
+
+Equivalent CLI commands are `memora people-cluster`, `memora people-merge` and
+`memora people-remove`. The API exposes `POST /people/cluster`, `GET /people`,
+`POST /people/merge` and `POST /people/remove-photo`.
+
+阶段 3 测试记录见
+[`docs/stage3_people_clustering_test.md`](docs/stage3_people_clustering_test.md)。
+
 ## API
 
 Start the server with `uvicorn memora.api.main:app --reload` and use:
@@ -94,6 +189,10 @@ Start the server with `uvicorn memora.api.main:app --reload` and use:
 - `GET /health`
 - `POST /index` with `{ "directory": "...", "index_path": "..." }`
 - `POST /search` with `{ "query": "...", "top_k": 20 }`
+- `POST /people/cluster`
+- `GET /people`
+- `POST /people/merge`
+- `POST /people/remove-photo`
 - `GET /events`
 - `GET /similar-groups`
 - `GET /quality/{photo_id}`
