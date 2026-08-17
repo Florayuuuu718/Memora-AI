@@ -1,0 +1,12 @@
+services:
+  memora-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MEMORA_INDEX_PATH: /app/data/index.json
+      MEMORA_ENCODER: lightweight
+    volumes:
+      - ./data:/app/data
+      - ./photos:/app/photos:ro
+
