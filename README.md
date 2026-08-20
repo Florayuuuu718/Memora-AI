@@ -1,5 +1,7 @@
 # Memora AI
 
+English | [简体中文](README_CN.md)
+
 Memora AI is an independent photo-understanding and retrieval service. It is designed to sit beside a self-hosted photo manager such as Immich:
 
 ```text
