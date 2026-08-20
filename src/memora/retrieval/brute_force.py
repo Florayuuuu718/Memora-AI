@@ -23,6 +23,5 @@ def search(records: list[PhotoRecord], query: np.ndarray, top_k: int = 20, min_s
         if min_score is not None and score < min_score:
             continue
         record = usable[int(position)][1]
-        output.append(SearchResult(record.id, record.path, score, record.captured_at))
+        output.append(SearchResult(record.id, record.path, score, record.captured_at, record.source))
     return output
-

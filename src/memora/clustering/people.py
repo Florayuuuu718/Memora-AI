@@ -53,10 +53,35 @@ def _read_bgr(path: str) -> np.ndarray:
     return image
 
 
+def _appearance_descriptor(image: np.ndarray, bbox: list[float]) -> list[float]:
+    """Extract a lightweight upper-body colour descriptor below a face box."""
+    if len(bbox) < 4:
+        return []
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = bbox[:4]
+    face_width = max(x2 - x1, 1.0)
+    face_height = max(y2 - y1, 1.0)
+    left = max(0, int(x1 - 0.6 * face_width))
+    right = min(width, int(x2 + 0.6 * face_width))
+    top = max(0, int(y2))
+    bottom = min(height, int(y2 + 3.0 * face_height))
+    crop = image[top:bottom, left:right]
+    if crop.size == 0:
+        return []
+    features = []
+    for channel in range(min(crop.shape[2], 3)):
+        histogram, _ = np.histogram(crop[:, :, channel], bins=8, range=(0, 256))
+        features.extend(histogram.astype(np.float32).tolist())
+    vector = np.asarray(features, dtype=np.float32)
+    norm = float(np.linalg.norm(vector))
+    return (vector / norm).tolist() if norm > 1e-12 else []
+
+
 def extract_faces(records: list[PhotoRecord], encoder: InsightFaceEncoder) -> list[FaceRecord]:
     output: list[FaceRecord] = []
     for record in records:
-        detections = encoder.detect(_read_bgr(record.path))
+        image = _read_bgr(record.path)
+        detections = encoder.detect(image)
         for index, detection in enumerate(detections):
             embedding = np.asarray(detection.get("embedding", []), dtype=np.float32)
             norm = float(np.linalg.norm(embedding))
@@ -70,6 +95,10 @@ def extract_faces(records: list[PhotoRecord], encoder: InsightFaceEncoder) -> li
                     bbox=[float(value) for value in detection.get("bbox", [])],
                     embedding=embedding.tolist(),
                     det_score=float(detection.get("det_score", 0.0)),
+                    appearance_embedding=_appearance_descriptor(
+                        image,
+                        [float(value) for value in detection.get("bbox", [])],
+                    ),
                 )
             )
     return output
@@ -138,6 +167,7 @@ def apply_feedback(
             photo_ids=list(group.photo_ids),
             prototype=list(group.prototype),
             removed_photo_ids=list(group.removed_photo_ids),
+            name=group.name,
         )
         for group in index.groups
     }
@@ -187,6 +217,19 @@ def apply_feedback(
         model_name=index.model_name,
         feedback={"merges": applied_merges, "removed_photos": applied_removals},
     )
+
+
+def set_person_name(index: PeopleIndex, person_id: int, name: str | None) -> PeopleIndex:
+    """Set or clear a human-readable person name without changing clustering."""
+    matched = False
+    for group in index.groups:
+        if group.id == person_id:
+            group.name = name.strip() if name and name.strip() else None
+            matched = True
+            break
+    if not matched:
+        raise ValueError(f"Unknown person ID: {person_id}")
+    return index
 
 
 def save_people_index(index: PeopleIndex, path: str | Path) -> None:

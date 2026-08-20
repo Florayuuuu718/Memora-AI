@@ -3,7 +3,13 @@
 Memora AI is an independent photo-understanding and retrieval service. It is designed to sit beside a self-hosted photo manager such as Immich:
 
 ```text
-Immich (gallery, upload, albums)  -->  Memora AI (algorithms, retrieval, ranking)
+Immich (upload, albums, timeline, UI)
+        | REST API: metadata + preview thumbnails
+        v
+Memora AI (retrieval, people, events, similar shots, best shot)
+        | asset UUID + authenticated thumbnail proxy
+        v
+Immich-facing UI
 ```
 
 The project focuses on the parts that are useful for an image-algorithm portfolio:
@@ -182,6 +188,214 @@ Equivalent CLI commands are `memora people-cluster`, `memora people-merge` and
 阶段 3 测试记录见
 [`docs/stage3_people_clustering_test.md`](docs/stage3_people_clustering_test.md)。
 
+## Stage 4: event discovery ablation
+
+Event discovery exposes the three planned strategies:
+
+- `time_only`: temporal gap baseline;
+- `time_clip`: time plus CLIP embedding distance;
+- `time_clip_gps`: time plus CLIP plus GPS distance.
+- `strict_event`: trusts EXIF capture time, treats filesystem time as upload-batch
+  metadata only, and uses conservative CLIP-only matching for photos without
+  EXIF.
+
+Run an individual strategy with the CLI or API:
+
+```powershell
+memora events --index-path data/index.json --strategy time_clip_gps
+# GET /events?strategy=time_only
+```
+
+The strict comparison is:
+
+```powershell
+memora events --index-path data/index.json --strategy strict_event
+```
+
+Its initial CLIP thresholds are intentionally conservative (`0.86` for
+photos in the same upload batch and `0.92` across batches or between EXIF and
+non-EXIF photos). These are starting points and should be calibrated against
+the manually labelled event set.
+
+Ver4 adds `strict_event_people`, journey discovery, EventName, JourneyName
+and JourneyNote generation. See
+[`docs/ver4_events_journeys.md`](docs/ver4_events_journeys.md) for the data
+model, CLI examples and annotation format.
+
+Journey locations are inferred from EXIF GPS by default: recurring clusters
+identify the home region, other clusters become destination candidates, and
+the optional offline geocoder supplies nearest-locality names. Install it with
+`pip install -e ".[geocoding]"`. Manual home/destination arguments remain
+available as explicit overrides.
+
+Narrative generation automatically prefers the configured LLM when
+`MEMORA_LLM_URL` and `MEMORA_LLM_MODEL` exist. The first endpoint failure opens
+a circuit breaker and all remaining names fall back to deterministic templates.
+Use `--no-llm` to force template-only generation.
+
+### Configure LLM generation
+
+Memora uses an OpenAI-compatible Chat Completions endpoint. Cloud providers
+normally require an API key; a local compatible server may not require one.
+Set the variables in the same PowerShell terminal before starting FastAPI:
+
+```powershell
+$env:MEMORA_LLM_URL = "https://your-provider.example/v1/chat/completions"
+$env:MEMORA_LLM_MODEL = "your-model-name"
+$env:MEMORA_LLM_API_KEY = "your-api-key"
+python -m uvicorn memora.api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+For a local OpenAI-compatible endpoint, omit the API key when authentication
+is disabled:
+
+```powershell
+$env:MEMORA_LLM_URL = "http://localhost:YOUR_PORT/v1/chat/completions"
+$env:MEMORA_LLM_MODEL = "your-local-model"
+Remove-Item Env:MEMORA_LLM_API_KEY -ErrorAction SilentlyContinue
+python -m uvicorn memora.api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Environment variables are read when the backend starts, so restart FastAPI
+after changing them. Never commit an API key to the repository or frontend.
+
+Create a JSON object mapping each photo ID to a ground-truth event ID and
+evaluate all three strategies:
+
+```powershell
+python scripts/evaluate_events.py data/event_labels.json --index-path data/index.json
+```
+
+The output contains pairwise Event Precision, Event Recall and Event F1. This
+metric is invariant to the numeric IDs assigned to discovered events.
+
+## Stage 5: similar shots and best shot
+
+`group_similar` combines pHash distance, CLIP cosine similarity and a capture
+time window. Each returned `SimilarGroup.representative_id` is the quality-
+ranked best shot in that group. The quality score contains sharpness,
+exposure, face quality and composition signals, and is stored in each indexed
+photo's `quality` object.
+
+```powershell
+memora similar --index-path data/index.json --phash-distance 10 `
+  --visual-similarity 0.90 --time-window-seconds 30
+```
+
+## Stage 6: vector index benchmark
+
+The exact NumPy index remains the recall ground truth. The benchmark compares
+NumPy exact, FAISS Flat, hnswlib HNSW and Qdrant HNSW:
+
+```powershell
+pip install -e ".[vector]"
+python scripts/benchmark.py --index-path data/index.json --queries 100
+```
+
+Results include Recall@10 against NumPy exact, mean latency, P95 latency and
+estimated index memory. To run only the dependency-free baseline:
+
+```powershell
+python scripts/benchmark.py --count 1000 --dimension 256 --backend numpy_exact
+```
+
+The HNSW benchmark uses FAISS's native `IndexHNSWFlat`, so the normal
+`[vector]` installation does not need `hnswlib` or Visual Studio Build Tools.
+`hnswlib` is kept only as an optional alternative backend. On Windows, pip
+may need to compile it locally and therefore requires MSVC 14.0+:
+
+```powershell
+pip install -e ".[hnsw]"
+```
+
+Alternatively install `hnswlib` from conda-forge. FAISS Flat, FAISS HNSW and
+Qdrant HNSW are included in the normal `[vector]` extra.
+
+The Qdrant benchmark uses an in-memory Qdrant client by default. Pass the
+`QdrantHnswIndex` adapter a server URL when deploying it as a service.
+
+## Stage 7: Immich integration
+
+Immich remains the system of record for uploads, albums and the timeline.
+Memora reads image metadata and preview thumbnails through the Immich API,
+indexes them locally, and returns the original Immich asset UUID in every AI
+result. No direct access to Immich's upload-library filesystem or database is
+required.
+
+Create an API key in Immich and configure Memora (do not commit the key):
+
+```powershell
+$env:MEMORA_IMMICH_URL = "http://localhost:2283"
+$env:MEMORA_IMMICH_API_KEY = "your-api-key"
+$env:MEMORA_ENCODER = "open_clip"
+memora immich-status
+memora immich-sync --encoder open_clip --index-path data/index.json
+```
+
+Incremental sync reuses an embedding when both the Immich `updatedAt` value
+and cached preview are unchanged. Use `--force` after changing the encoder or
+model. `--prune-missing` removes missing Immich assets from the Memora index,
+but never deletes assets from Immich.
+
+The HTTP integration endpoints are:
+
+- `GET /immich/status` — verify connectivity and report the server version;
+- `POST /immich/sync` — incrementally refresh the Memora index;
+- `GET /immich/assets/{asset_id}/thumbnail` — authenticated image proxy for a UI;
+- `POST /immich/albums` — publish selected search/event/best-shot IDs as an Immich album.
+
+Search results from Immich include `immich_asset_id` and `thumbnail_url`, so a
+frontend can render Memora results without receiving the Immich API key. See
+[`docs/stage7_immich_integration.md`](docs/stage7_immich_integration.md) for the
+deployment contract, permissions and example requests.
+
+### Memora frontend
+
+The independent dashboard is built with Vue 3, TypeScript and Vite. Start the
+FastAPI service first, then run the frontend in a second terminal:
+
+#### Two-terminal local test (Windows PowerShell)
+
+Open two PowerShell terminals in the project root (`D:\00A\project\AIbum`).
+
+Terminal 1 — start the FastAPI backend:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn memora.api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Keep this terminal running. You can verify the backend at
+`http://localhost:8000/docs`.
+
+Terminal 2 — start the Vue frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+After frontend source changes, stop any older Vite process with `Ctrl+C` and
+run `npm run dev` again. The dev command forces Vite to refresh its cache and
+will fail instead of silently switching to another port when `5173` is already
+occupied.
+
+Run `npm install` only the first time, or after `package.json` changes. Open
+the frontend at `http://localhost:5173`. The Vite development server proxies
+`/api/*` requests to the FastAPI service on port `8000`.
+
+The landing page is a project console: users can select photos or a complete
+local folder, preserve its subfolder structure, and create an isolated photo
+workspace. Inside a workspace they can run indexing, natural-language search,
+InsightFace clustering, event discovery, similar-shot grouping and best-shot
+ranking. Results can be exported as a JSON project manifest, a CSV photo index,
+or a ZIP containing the highest-ranked original photos.
+
+Each project is stored under `data/projects/<project-id>/` with separate
+uploads, indexes, people clusters and generated exports. This directory is
+private user data and is ignored by Git.
+
 ## API
 
 Start the server with `uvicorn memora.api.main:app --reload` and use:
@@ -193,9 +407,25 @@ Start the server with `uvicorn memora.api.main:app --reload` and use:
 - `GET /people`
 - `POST /people/merge`
 - `POST /people/remove-photo`
+- `POST /people/name`
 - `GET /events`
+- `POST /journeys/discover`
 - `GET /similar-groups`
 - `GET /quality/{photo_id}`
+- `GET /immich/status`
+- `POST /immich/sync`
+- `GET /immich/assets/{asset_id}/thumbnail`
+- `POST /immich/albums`
+- `GET/POST /projects`
+- `POST /projects/{project_id}/files`
+- `POST /projects/{project_id}/analyze`
+- `GET /projects/{project_id}/photos`
+- `POST /projects/{project_id}/search`
+- `GET /projects/{project_id}/events`
+- `GET /projects/{project_id}/similar-groups`
+- `GET /projects/{project_id}/best-shots`
+- `GET/POST /projects/{project_id}/people[/cluster]`
+- `GET /projects/{project_id}/export/{manifest|photos.csv|best-shots.zip}`
 
 ## Architecture
 

@@ -1,4 +1,3 @@
 """Memora AI core."""
 
-__version__ = "0.1.0"
-
+__version__ = "0.7.0"

@@ -4,7 +4,21 @@ from memora.retrieval.brute_force import cosine_scores
 import numpy as np
 
 
-def group_similar(records: list[PhotoRecord], *, phash_distance: int = 10, visual_similarity: float = 0.90, time_window_seconds: float = 30.0) -> list[SimilarGroup]:
+def group_similar(
+    records: list[PhotoRecord],
+    *,
+    phash_distance: int = 10,
+    visual_similarity: float = 0.90,
+    time_window_seconds: float = 30.0,
+    require_time: bool = True,
+) -> list[SimilarGroup]:
+    """Group burst/near-duplicate shots using pHash + CLIP + time.
+
+    A pair is grouped when its pHash is close or its CLIP cosine similarity
+    exceeds the threshold, and (by default) it was captured in the same time
+    window. The time gate prevents visually similar photos from unrelated
+    days becoming one burst group.
+    """
     parent = list(range(len(records)))
 
     def find(index: int) -> int:
@@ -27,7 +41,7 @@ def group_similar(records: list[PhotoRecord], *, phash_distance: int = 10, visua
             close_time = True
             if records[left].timestamp and records[right].timestamp:
                 close_time = abs((records[left].timestamp - records[right].timestamp).total_seconds()) <= time_window_seconds
-            if same_hash or (same_visual and close_time):
+            if (same_hash or same_visual) and (close_time or not require_time):
                 union(left, right)
     clusters: dict[int, list[PhotoRecord]] = {}
     for index, record in enumerate(records):
@@ -42,3 +56,13 @@ def group_similar(records: list[PhotoRecord], *, phash_distance: int = 10, visua
         group_id += 1
     return output
 
+
+def best_shot_by_group(records: list[PhotoRecord], groups: list[SimilarGroup]) -> dict[int, PhotoRecord]:
+    """Resolve each similar-shot group to its quality-ranked best photo."""
+    by_id = {record.id: record for record in records}
+    output: dict[int, PhotoRecord] = {}
+    for group in groups:
+        candidates = [by_id[photo_id] for photo_id in group.photo_ids if photo_id in by_id]
+        if candidates:
+            output[group.id] = max(candidates, key=lambda item: item.quality.get("score", 0.0))
+    return output

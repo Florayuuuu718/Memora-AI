@@ -5,8 +5,10 @@ services:
       - "8000:8000"
     environment:
       MEMORA_INDEX_PATH: /app/data/index.json
-      MEMORA_ENCODER: lightweight
+      MEMORA_ENCODER: ${MEMORA_ENCODER:-lightweight}
+      MEMORA_IMMICH_URL: ${MEMORA_IMMICH_URL:-}
+      MEMORA_IMMICH_API_KEY: ${MEMORA_IMMICH_API_KEY:-}
+      MEMORA_IMMICH_CACHE_PATH: /app/data/immich-cache
     volumes:
       - ./data:/app/data
       - ./photos:/app/photos:ro
-

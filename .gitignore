@@ -17,3 +17,11 @@ data/*.db
 
 # Local indexes, manifests and evaluation labels generated from private photos.
 /data/*.json
+/data/*.csv
+/data/immich-cache/
+/data/projects/
+
+# Vue/Vite frontend dependencies and build output.
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.npm-cache/
