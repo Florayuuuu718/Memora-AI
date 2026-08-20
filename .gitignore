@@ -15,6 +15,9 @@ data/*.db
 /photos/
 /photos_prepared/
 
+# Documentation used for local development tracking
+/docs/
+
 # Local indexes, manifests and evaluation labels generated from private photos.
 /data/*.json
 /data/*.csv
