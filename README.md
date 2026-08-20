@@ -21,6 +21,29 @@ The project focuses on the parts that are useful for an image-algorithm portfoli
 - pluggable OpenCLIP, InsightFace and Qdrant integrations;
 - reproducible evaluation and brute-force baselines.
 
+## Open-source dependencies and acknowledgements
+
+Memora AI is built on open-source software. This repository keeps its own
+implementation independent, while integrating the following key projects:
+
+| Project | Usage in Memora AI |
+| --- | --- |
+| [FastAPI](https://fastapi.tiangolo.com/) and [Uvicorn](https://www.uvicorn.org/) | Python HTTP API and local service runtime. |
+| [Vue](https://vuejs.org/) and [Vite](https://vite.dev/) | Web dashboard and frontend development tooling. |
+| [OpenCLIP](https://github.com/mlfoundations/open_clip) and [PyTorch](https://pytorch.org/) | Optional image-text embedding and semantic retrieval. |
+| [InsightFace](https://github.com/deepinsight/insightface) and [ONNX Runtime](https://onnxruntime.ai/) | Optional face detection and face embeddings for people clustering. |
+| [FAISS](https://github.com/facebookresearch/faiss), [Qdrant](https://qdrant.tech/) and [hnswlib](https://github.com/nmslib/hnswlib) | Optional vector-index backends and retrieval benchmarks. |
+| [OpenCV](https://opencv.org/), [scikit-learn](https://scikit-learn.org/) and [ImageHash](https://github.com/JohannesBuchner/imagehash) | Image analysis, clustering and perceptual-hash duplicate detection. |
+| [Immich](https://immich.app/) | Optional self-hosted photo-library integration; Immich remains the system of record for assets. |
+
+Please comply with the licenses, copyright notices and model-weight terms of
+each dependency when distributing or deploying this project. In particular,
+pretrained model weights, datasets and external services may have terms that
+differ from the Python or JavaScript package that loads them. See
+[`pyproject.toml`](pyproject.toml) and
+[`frontend/package.json`](frontend/package.json) for the complete direct
+dependency lists.
+
 ## Private test data
 
 This repository does not contain the developer's private test photos. The
@@ -444,11 +467,28 @@ raw photo
 
 `HashImageEncoder` and NumPy brute-force search are intentionally included as baselines. They make the algorithm pipeline testable without model downloads. `OpenCLIPEncoder`, `InsightFaceEncoder` and `QdrantStore` are optional adapters rather than hard requirements.
 
-## Algorithm roadmap
+## Roadmap
 
-1. Retrieval: raw embedding -> prompt ensemble -> query expansion -> metadata filtering.
-2. People: face embeddings -> DBSCAN -> quality-weighted person prototypes -> human constraints.
-3. Events: time only -> time + visual -> time + visual + GPS ablation.
-4. Ranking: pHash + CLIP + time for similar shots, then sharpness/exposure/face quality for best shot.
+### v1.0: usable local photo intelligence
 
-The current repository implements the first usable version of all four paths and leaves model-specific adapters replaceable.
+- Semantic image-text retrieval with query-expansion and metadata filters.
+- People clustering, event discovery, similar-shot grouping and best-shot ranking.
+- Local project workspaces, result export and a Vue dashboard.
+- Optional Immich synchronization without direct access to Immich storage or database.
+
+### v1.1: quality, control and deployment
+
+- Improve retrieval, event and people-clustering accuracy with labelled evaluation sets and configurable thresholds.
+- Add human feedback workflows for correcting people, events, rankings and generated names.
+- Improve incremental indexing, vector-store configuration and GPU/CPU deployment guidance.
+- Add stronger observability, error handling and regression coverage for API and frontend workflows.
+
+### v2.0: collaborative and production-ready photo intelligence
+
+- Introduce multi-user workspaces, access control and persistent service deployment.
+- Support scalable background processing, distributed vector storage and large-library synchronization.
+- Provide richer album, journey and story generation with auditable user controls.
+- Expand integration APIs so photo managers and other clients can consume AI results directly.
+
+The roadmap describes product milestones. Package and frontend versions remain
+tracked in `pyproject.toml` and `frontend/package.json` respectively.
