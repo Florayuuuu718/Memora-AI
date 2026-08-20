@@ -14,6 +14,8 @@ export interface PhotoProject {
   photo_count: number
   analyzed_count: number
   status: 'empty' | 'uploaded' | 'analyzing' | 'ready'
+  encoder: 'lightweight' | 'open_clip' | null
+  embedding_dimension: number | null
 }
 
 export interface ProjectPhoto {

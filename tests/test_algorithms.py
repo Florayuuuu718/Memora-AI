@@ -295,6 +295,9 @@ def test_query_strategies_are_distinct_and_support_chinese_expansion():
     assert len(query_texts("海边", "raw_clip")) == 1
     assert len(query_texts("海边", "prompt_ensemble")) == 5
     assert len(query_texts("海边", "query_enhancement")) == 5
+    assert "a beach" in expand_query("海边的照片")
+    assert "a small animal" in expand_query("可爱的小动物")
+    assert "a plate of food" in expand_query("聚餐美食")
 
 
 def test_recall_and_strategy_evaluation():

@@ -2,6 +2,7 @@ import csv
 import json
 import re
 import zipfile
+from functools import lru_cache
 from io import BytesIO, StringIO
 from pathlib import Path
 from threading import Lock
@@ -33,6 +34,7 @@ from memora.generation.narrative import (
 from memora.indexer import IMAGE_EXTENSIONS, iter_images, photo_id
 from memora.integrations.immich import ImmichClient, ImmichError, sync_immich_assets
 from memora.projects import ProjectCatalog
+from memora.quality.best_shot import score_photo
 from memora.retrieval.metadata_filter import GeoBounds
 from memora.service import MemoraService
 
@@ -41,6 +43,7 @@ service = MemoraService(create_encoder(settings.encoder, model_name=settings.cli
 immich_sync_lock = Lock()
 project_analysis_lock = Lock()
 projects = ProjectCatalog(settings.projects_path)
+PROJECT_EVENT_STRATEGY = "strict_event_people"
 
 
 @app.get("/", include_in_schema=False)
@@ -69,7 +72,7 @@ class SearchRequest(BaseModel):
 class PeopleClusterRequest(BaseModel):
     people_path: str = "data/people.json"
     model_name: str = "buffalo_l"
-    ctx_id: int = Field(default=0, ge=-1, le=0)
+    ctx_id: int | None = Field(default=None, ge=-1, le=0)
     eps: float = Field(default=0.35, gt=0)
     min_samples: int = Field(default=2, ge=2)
 
@@ -137,6 +140,43 @@ class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class ProjectAnalyzeRequest(BaseModel):
+    encoder: str | None = Field(default=None, pattern="^(lightweight|open_clip)$")
+
+
+@lru_cache(maxsize=2)
+def _project_encoder(kind: str):
+    if kind == settings.encoder:
+        return service.encoder
+    return create_encoder(
+        kind,
+        model_name=settings.clip_model,
+        pretrained=settings.clip_pretrained,
+    )
+
+
+def _face_ctx_id(requested: int | None) -> int:
+    if requested is not None:
+        return requested
+    try:
+        import onnxruntime  # type: ignore
+
+        return 0 if "CUDAExecutionProvider" in onnxruntime.get_available_providers() else -1
+    except ImportError:
+        return -1
+
+
+def _enrich_quality_with_faces(project_service: MemoraService, people_index) -> None:
+    faces_by_photo: dict[str, list[dict[str, object]]] = {}
+    for face in people_index.faces:
+        faces_by_photo.setdefault(face.photo_id, []).append(
+            {"bbox": face.bbox, "det_score": face.det_score}
+        )
+    for record in project_service.records:
+        record.quality = score_photo(record.path, faces=faces_by_photo.get(record.id, []))
+    project_service.store.save(project_service.index_path)
+
+
 def _immich_client() -> ImmichClient:
     if not settings.immich_url or not settings.immich_api_key:
         raise HTTPException(
@@ -167,8 +207,26 @@ def _project(project_id: str):
 
 
 def _project_service(project_id: str) -> MemoraService:
-    _project(project_id)
-    return MemoraService(service.encoder, projects.index_path(project_id))
+    project = _project(project_id)
+    encoder_kind = project.encoder or settings.encoder
+    try:
+        encoder = _project_encoder(encoder_kind)
+    except (ImportError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Project encoder '{encoder_kind}' is unavailable: {exc}",
+        ) from exc
+    project_service = MemoraService(encoder, projects.index_path(project_id))
+    if (
+        project_service.records
+        and project.embedding_dimension
+        and project.embedding_dimension != encoder.dimension
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The project index was created with a different encoder. Re-analyze the project.",
+        )
+    return project_service
 
 
 def _project_photo(project_id: str, requested_id: str) -> Path:
@@ -302,22 +360,29 @@ async def upload_project_files(
 
 
 @app.post("/projects/{project_id}/analyze")
-def analyze_project(project_id: str) -> dict:
+def analyze_project(project_id: str, request: ProjectAnalyzeRequest | None = None) -> dict:
     project = _project(project_id)
     if not project.photo_count:
         raise HTTPException(status_code=400, detail="Upload photos before starting analysis")
     with project_analysis_lock:
         projects.touch(project_id, status="analyzing")
         try:
-            project_service = _project_service(project_id)
+            encoder_kind = request.encoder if request and request.encoder else settings.encoder
+            encoder = _project_encoder(encoder_kind)
+            project_service = MemoraService(encoder, projects.index_path(project_id))
             records = project_service.index(projects.uploads(project_id))
+            people_index = load_people_index(projects.people_path(project_id))
+            if people_index.faces:
+                _enrich_quality_with_faces(project_service, people_index)
             project = projects.touch(
                 project_id,
                 photo_count=len(records),
                 analyzed_count=len(records),
                 status="ready",
+                encoder=encoder_kind,
+                embedding_dimension=encoder.dimension,
             )
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
             projects.touch(project_id, status="uploaded")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"project": project.to_dict(), "index_path": str(projects.index_path(project_id))}
@@ -379,8 +444,8 @@ def project_search(project_id: str, request: SearchRequest) -> dict:
 
 
 @app.get("/projects/{project_id}/events")
-def project_events(project_id: str, strategy: str = "time_clip_gps") -> dict:
-    if strategy not in {"time_only", "time_clip", "time_clip_gps", "strict_event"}:
+def project_events(project_id: str, strategy: str = PROJECT_EVENT_STRATEGY) -> dict:
+    if strategy not in {"time_only", "time_clip", "time_clip_gps", "strict_event", "strict_event_people"}:
         raise HTTPException(status_code=400, detail="Unsupported project event strategy")
     project_service = _project_service(project_id)
     people_index = load_people_index(projects.people_path(project_id))
@@ -390,7 +455,7 @@ def project_events(project_id: str, strategy: str = "time_clip_gps") -> dict:
     for event in values:
         item = {**event.__dict__, **annotations.get(str(event.id), {})}
         payload.append(item)
-    return {"events": payload}
+    return {"strategy": strategy, "events": payload}
 
 
 @app.get("/projects/{project_id}/journeys")
@@ -398,10 +463,15 @@ def project_journeys(project_id: str) -> dict:
     project_service = _project_service(project_id)
     try:
         config, _ = infer_journey_config(project_service.records, geocode=True)
-        _, journeys = project_service.journeys(config, people_path=projects.people_path(project_id), generate_narratives=False)
+        events, journeys = project_service.journeys(
+            config,
+            people_path=projects.people_path(project_id),
+            strategy=PROJECT_EVENT_STRATEGY,
+            generate_narratives=False,
+        )
     except ValueError:
+        events = []
         journeys = []
-    events = project_service.events(strategy="time_clip_gps")
     events_by_id = {event.id: event for event in events}
     annotations = projects.load_annotations(project_id)["journeys"]
     payload = []
@@ -409,7 +479,7 @@ def project_journeys(project_id: str) -> dict:
         item = {**journey.__dict__, "photo_ids": [photo_id for event_id in journey.event_ids for photo_id in (events_by_id[event_id].photo_ids if event_id in events_by_id else [])]}
         item.update(annotations.get(str(journey.id), {}))
         payload.append(item)
-    return {"journeys": payload}
+    return {"event_strategy": PROJECT_EVENT_STRATEGY, "journeys": payload}
 
 
 @app.get("/projects/{project_id}/annotations")
@@ -474,7 +544,7 @@ def generate_project_annotation(project_id: str, kind: str, item_id: int, reques
             value = generated[request.field]
         elif kind == "events":
             event = next(
-                (value for value in project_service.events(strategy="time_clip_gps", people_index=people_index) if value.id == item_id),
+                (value for value in project_service.events(strategy=PROJECT_EVENT_STRATEGY, people_index=people_index) if value.id == item_id),
                 None,
             )
             if event is None:
@@ -577,7 +647,8 @@ def cluster_project_people(project_id: str, request: PeopleClusterRequest) -> di
     if not project_service.records:
         raise HTTPException(status_code=400, detail="Analyze the project before clustering people")
     try:
-        encoder = InsightFaceEncoder(model_name=request.model_name, ctx_id=request.ctx_id)
+        ctx_id = _face_ctx_id(request.ctx_id)
+        encoder = InsightFaceEncoder(model_name=request.model_name, ctx_id=ctx_id)
         people_index = cluster_people(
             project_service.records,
             encoder,
@@ -586,9 +657,11 @@ def cluster_project_people(project_id: str, request: PeopleClusterRequest) -> di
             min_samples=request.min_samples,
         )
         save_people_index(people_index, projects.people_path(project_id))
+        _enrich_quality_with_faces(project_service, people_index)
     except (ImportError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     records = {record.id: record for record in project_service.records}
+    annotations = projects.load_annotations(project_id)["people"]
     face_counts: dict[str, int] = {}
     for face in people_index.faces:
         face_counts[face.photo_id] = face_counts.get(face.photo_id, 0) + 1
@@ -596,8 +669,13 @@ def cluster_project_people(project_id: str, request: PeopleClusterRequest) -> di
     for group in people_index.groups:
         candidates = [photo for photo in group.photo_ids if face_counts.get(photo) == 1] or group.photo_ids
         cover = max(candidates, key=lambda photo: records.get(photo).quality.get("score", 0.0) if records.get(photo) else 0.0, default=None)
-        groups.append({**group.__dict__, "cover_photo_id": cover, "cover_url": f"/projects/{project_id}/people/{group.id}/cover"})
-    return {"groups": groups, "faces": [face.__dict__ for face in people_index.faces]}
+        groups.append({
+            **group.__dict__,
+            "cover_photo_id": cover,
+            "cover_url": f"/projects/{project_id}/people/{group.id}/cover",
+            **annotations.get(str(group.id), {}),
+        })
+    return {"groups": groups, "faces": [face.__dict__ for face in people_index.faces], "ctx_id": ctx_id}
 
 
 @app.get("/projects/{project_id}/best-shots")
@@ -628,7 +706,13 @@ def export_project_manifest(project_id: str) -> JSONResponse:
         "format": "memora-project-v1",
         "project": project.to_dict(),
         "photos": [record.to_dict() for record in project_service.records],
-        "events": [event.__dict__ for event in project_service.events(strategy="time_clip_gps")],
+        "events": [
+            event.__dict__
+            for event in project_service.events(
+                strategy=PROJECT_EVENT_STRATEGY,
+                people_path=projects.people_path(project_id),
+            )
+        ],
         "similar_groups": [group.__dict__ for group in project_service.similar_groups()],
     }
     filename = re.sub(r"[^A-Za-z0-9_-]+", "-", project.name).strip("-") or project.id
@@ -857,7 +941,8 @@ def quality(photo_id: str) -> dict:
 @app.post("/people/cluster")
 def cluster_people_endpoint(request: PeopleClusterRequest) -> dict:
     try:
-        encoder = InsightFaceEncoder(model_name=request.model_name, ctx_id=request.ctx_id)
+        ctx_id = _face_ctx_id(request.ctx_id)
+        encoder = InsightFaceEncoder(model_name=request.model_name, ctx_id=ctx_id)
         people = cluster_people(
             service.records,
             encoder,
@@ -866,6 +951,7 @@ def cluster_people_endpoint(request: PeopleClusterRequest) -> dict:
             min_samples=request.min_samples,
         )
         save_people_index(people, request.people_path)
+        _enrich_quality_with_faces(service, people)
     except (ImportError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
@@ -874,6 +960,7 @@ def cluster_people_endpoint(request: PeopleClusterRequest) -> dict:
         "group_count": len(people.groups),
         "noise_face_count": len(people.noise_face_ids),
         "people_path": request.people_path,
+        "ctx_id": ctx_id,
     }
 
 

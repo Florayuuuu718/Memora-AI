@@ -30,12 +30,22 @@ _EXPANSIONS = {
     "dog": ["a dog", "a puppy", "a pet dog"],
     "猫": ["a cat", "a kitten", "a pet cat"],
     "cat": ["a cat", "a kitten", "a pet cat"],
+    "小动物": ["a small animal", "a cute pet", "a cat or dog", "a small furry animal"],
+    "small animals": ["a small animal", "a cute pet", "a cat or dog"],
+    "食物": ["food", "a meal", "a plate of food", "fruit and food"],
+    "美食": ["delicious food", "a restaurant meal", "a plate of food"],
+    "food": ["food", "a meal", "a plate of food", "fruit and food"],
 }
 
 
 def expand_query(query: str) -> list[str]:
     query = query.strip()
-    expansions = list(_EXPANSIONS.get(query.casefold(), _EXPANSIONS.get(query, [])))
+    folded = query.casefold()
+    expansions = list(_EXPANSIONS.get(folded, _EXPANSIONS.get(query, [])))
+    if not expansions:
+        for key, candidates in _EXPANSIONS.items():
+            if key.casefold() in folded:
+                expansions.extend(candidates)
     if not expansions:
         words = [word for word in re.split(r"\s+", query) if word]
         expansions = [query, f"a photo of {query}"]

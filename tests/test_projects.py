@@ -43,13 +43,19 @@ def test_project_upload_analyze_and_export_api(tmp_path, monkeypatch):
     assert uploaded.status_code == 200
     assert uploaded.json()["project"]["photo_count"] == 1
 
-    analyzed = client.post(f"/projects/{project_id}/analyze")
+    analyzed = client.post(f"/projects/{project_id}/analyze", json={"encoder": "lightweight"})
     assert analyzed.status_code == 200
     assert analyzed.json()["project"]["status"] == "ready"
+    assert analyzed.json()["project"]["encoder"] == "lightweight"
+    assert analyzed.json()["project"]["embedding_dimension"] == 256
 
     photos = client.get(f"/projects/{project_id}/photos").json()["photos"]
     assert photos[0]["relative_path"] == "day-one/photo.jpg"
     assert client.get(photos[0]["url"]).status_code == 200
+
+    event_response = client.get(f"/projects/{project_id}/events")
+    assert event_response.status_code == 200
+    assert event_response.json()["strategy"] == "strict_event_people"
 
     manifest = client.get(f"/projects/{project_id}/export/manifest")
     csv_response = client.get(f"/projects/{project_id}/export/photos.csv")

@@ -401,14 +401,14 @@ npm install
 npm run dev
 ```
 
-After frontend source changes, stop any older Vite process with `Ctrl+C` and
-run `npm run dev` again. The dev command forces Vite to refresh its cache and
-will fail instead of silently switching to another port when `5173` is already
-occupied.
+After frontend source changes, stop the current Vite process with `Ctrl+C` and
+run `npm run dev` again. The dev command forces Vite to refresh its cache.
 
-Run `npm install` only the first time, or after `package.json` changes. Open
-the frontend at `http://localhost:5173`. The Vite development server proxies
-`/api/*` requests to the FastAPI service on port `8000`.
+Run `npm install` only the first time, or after `package.json` changes. Vite
+prefers `http://localhost:5173`; if that port is occupied, it automatically
+selects the next available port. Open the URL printed in the terminal. The
+Vite development server proxies `/api/*` requests to the FastAPI service on
+port `8000` regardless of the selected frontend port.
 
 The landing page is a project console: users can select photos or a complete
 local folder, preserve its subfolder structure, and create an isolated photo

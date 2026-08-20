@@ -28,6 +28,7 @@ const selectedJourney = ref<JourneyItem | null>(null)
 const editName = ref('')
 const editNote = ref('')
 const llmGenerating = ref<'name' | 'note' | null>(null)
+const loadedTabs = new Set<WorkspaceTab>()
 
 const photoById = computed(() => new Map(photos.value.map((photo) => [photo.id, photo])))
 const analyzedPercent = computed(() => project.value.photo_count ? Math.round(project.value.analyzed_count / project.value.photo_count * 100) : 0)
@@ -35,12 +36,23 @@ const folders = computed(() => new Set(photos.value.map((photo) => photo.relativ
 
 async function loadPhotos() { photos.value = (await api.photos(project.value.id)).photos }
 
+function clearDerivedResults() {
+  searchResults.value = []
+  events.value = []
+  journeys.value = []
+  groups.value = []
+  bestShots.value = []
+  people.value = []
+  loadedTabs.clear()
+}
+
 async function analyze() {
   busy.value = true
   error.value = ''
   project.value = { ...project.value, status: 'analyzing' }
   try {
     project.value = (await api.analyze(project.value.id)).project
+    clearDerivedResults()
     emit('updated', project.value)
     await loadPhotos()
   } catch (cause) {
@@ -56,6 +68,7 @@ async function uploadMore(event: Event) {
   busy.value = true
   try {
     project.value = (await api.uploadFiles(project.value.id, files)).project
+    clearDerivedResults()
     emit('updated', project.value)
     await loadPhotos()
   } catch (cause) {
@@ -67,7 +80,7 @@ async function uploadMore(event: Event) {
 }
 
 async function runSearch() {
-  if (!query.value.trim()) return
+  if (!query.value.trim() || project.value.encoder !== 'open_clip') return
   busy.value = true
   error.value = ''
   try { searchResults.value = (await api.search(project.value.id, query.value.trim())).results }
@@ -79,14 +92,24 @@ async function selectTab(next: WorkspaceTab) {
   tab.value = next
   error.value = ''
   if (project.value.status !== 'ready' || busy.value) return
+  if (!['events', 'similar', 'best', 'people'].includes(next) || loadedTabs.has(next)) return
   busy.value = true
   try {
-    if (next === 'events' && !events.value.length) events.value = (await api.events(project.value.id)).events
-    if (next === 'events' && !journeys.value.length) journeys.value = (await api.journeys(project.value.id)).journeys
-    if (next === 'events' && !people.value.length) people.value = (await api.people(project.value.id)).groups
-    if (next === 'similar' && !groups.value.length) groups.value = (await api.similar(project.value.id)).groups
-    if (next === 'best' && !bestShots.value.length) bestShots.value = (await api.bestShots(project.value.id)).photos
-    if (next === 'people' && !people.value.length) people.value = (await api.people(project.value.id)).groups
+    if (next === 'events') {
+      const [eventResponse, journeyResponse, peopleResponse] = await Promise.all([
+        api.events(project.value.id),
+        api.journeys(project.value.id),
+        api.people(project.value.id),
+      ])
+      events.value = eventResponse.events
+      journeys.value = journeyResponse.journeys
+      people.value = peopleResponse.groups
+      loadedTabs.add('people')
+    }
+    if (next === 'similar') groups.value = (await api.similar(project.value.id)).groups
+    if (next === 'best') bestShots.value = (await api.bestShots(project.value.id)).photos
+    if (next === 'people') people.value = (await api.people(project.value.id)).groups
+    loadedTabs.add(next)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : tr('Could not load analysis results', '无法加载分析结果')
   } finally { busy.value = false }
@@ -95,7 +118,17 @@ async function selectTab(next: WorkspaceTab) {
 async function analyzePeople() {
   busy.value = true
   error.value = ''
-  try { people.value = (await api.clusterPeople(project.value.id)).groups }
+  try {
+    people.value = (await api.clusterPeople(project.value.id)).groups
+    events.value = []
+    journeys.value = []
+    groups.value = []
+    bestShots.value = []
+    loadedTabs.delete('events')
+    loadedTabs.delete('similar')
+    loadedTabs.delete('best')
+    loadedTabs.add('people')
+  }
   catch (cause) { error.value = cause instanceof Error ? cause.message : tr('People clustering failed', '人物聚类失败') }
   finally { busy.value = false }
 }
@@ -174,7 +207,7 @@ onMounted(loadPhotos)
         <p>OUTPUT</p>
         <button :class="{ active: tab === 'export' }" @click="selectTab('export')"><span>⇩</span>{{ tr('Export Center', '导出中心') }}</button>
       </nav>
-      <div class="sidebar-status"><div><i :class="{ online: health?.status === 'ok' }"></i>{{ health?.encoder || 'AI service' }}</div><span>{{ analyzedPercent }}% {{ tr('analyzed', '已分析') }}</span></div>
+      <div class="sidebar-status"><div><i :class="{ online: health?.status === 'ok' }"></i>{{ project.encoder === 'open_clip' ? 'OpenCLIP' : (project.encoder || health?.encoder || 'AI service') }}</div><span>{{ analyzedPercent }}% {{ tr('analyzed', '已分析') }}</span></div>
     </aside>
 
     <main class="workspace-main">
@@ -187,14 +220,15 @@ onMounted(loadPhotos)
 
       <section v-if="tab === 'overview'" class="workspace-content">
         <div v-if="project.status !== 'ready'" class="analysis-callout"><div><p class="section-label">NEXT STEP</p><h2>{{ tr('Let AI understand this photo project', '让 AI 理解这个照片项目') }}</h2><p>{{ tr('Analysis creates visual embeddings, reads time and GPS data, scores image quality, and builds a private index for this project.', '分析会为每张照片生成视觉向量、读取时间和 GPS、计算画质，并建立该项目的专属索引。') }}</p></div><button class="primary-action" type="button" :disabled="busy" @click="analyze">{{ busy ? tr('Analyzing, please wait…', '正在分析，请稍候…') : tr(`Analyze ${project.photo_count} photos →`, `分析 ${project.photo_count} 张照片 →`) }}</button></div>
-        <div class="metric-row"><article><span>{{ tr('Photos', '照片') }}</span><strong>{{ project.photo_count }}</strong><small>{{ tr('Imported files', '已导入文件') }}</small></article><article><span>{{ tr('Folders', '文件夹') }}</span><strong>{{ folders }}</strong><small>{{ tr('Original structure preserved', '保留原始结构') }}</small></article><article><span>{{ tr('Analysis progress', '分析进度') }}</span><strong>{{ analyzedPercent }}%</strong><small>{{ project.status === 'ready' ? tr('Index ready', '索引可用') : tr('Waiting for processing', '等待处理') }}</small></article><article><span>{{ tr('Engine', '引擎') }}</span><strong class="engine-name">{{ health?.encoder || '—' }}</strong><small>{{ tr('Current vision encoder', '当前视觉编码器') }}</small></article></div>
+        <div class="metric-row"><article><span>{{ tr('Photos', '照片') }}</span><strong>{{ project.photo_count }}</strong><small>{{ tr('Imported files', '已导入文件') }}</small></article><article><span>{{ tr('Folders', '文件夹') }}</span><strong>{{ folders }}</strong><small>{{ tr('Original structure preserved', '保留原始结构') }}</small></article><article><span>{{ tr('Analysis progress', '分析进度') }}</span><strong>{{ analyzedPercent }}%</strong><small>{{ project.status === 'ready' ? tr('Index ready', '索引可用') : tr('Waiting for processing', '等待处理') }}</small></article><article><span>{{ tr('Engine', '引擎') }}</span><strong class="engine-name">{{ project.encoder === 'open_clip' ? 'OpenCLIP' : (project.encoder || health?.encoder || '—') }}</strong><small>{{ tr('Project index encoder', '项目索引编码器') }}</small></article></div>
         <div class="content-heading"><div><p class="section-label">PROJECT PHOTOS</p><h2>{{ tr('Photo browser', '照片浏览') }}</h2></div><span>{{ photos.length }} ITEMS</span></div>
         <div class="asset-grid"><article v-for="photo in photos" :key="photo.id"><img :src="mediaUrl(photo.url)" :alt="photo.filename" loading="lazy" /><div><strong>{{ photo.filename }}</strong><span>{{ photo.relative_path }}</span></div></article></div>
       </section>
 
       <section v-else-if="tab === 'search'" class="workspace-content narrow-content">
         <div class="tool-heading"><p class="section-label">SEMANTIC RETRIEVAL</p><h2>{{ tr('Find photos with one sentence', '用一句话找到照片') }}</h2><p>{{ tr('Describe a person, scene, time, or place—for example, “photos taken at the beach last summer.”', '可以描述人物、场景、时间或地点，例如“去年夏天在海边拍的照片”。') }}</p></div>
-        <form class="workspace-search" @submit.prevent="runSearch"><span>⌕</span><input v-model="query" :placeholder="tr('Describe the photos you want to find…', '描述你想找的照片…')" /><button class="primary-action" :disabled="busy || project.status !== 'ready'">{{ tr('Search', '搜索') }}</button></form>
+        <div v-if="project.encoder !== 'open_clip'" class="analysis-callout"><div><p class="section-label">OPENCLIP REQUIRED</p><h2>{{ tr('Rebuild the semantic index', '重建语义索引') }}</h2><p>{{ tr('This project uses the lightweight test encoder, which cannot provide semantic text-to-image retrieval. Re-analyze it with OpenCLIP before searching.', '此项目使用的是轻量测试编码器，无法提供真正的图文语义检索。请先用 OpenCLIP 重新分析。') }}</p></div><button class="primary-action" type="button" :disabled="busy" @click="analyze">{{ busy ? tr('Analyzing…', '正在分析…') : tr('Re-analyze with OpenCLIP', '使用 OpenCLIP 重新分析') }}</button></div>
+        <form class="workspace-search" @submit.prevent="runSearch"><span>⌕</span><input v-model="query" :placeholder="tr('Describe the photos you want to find…', '描述你想找的照片…')" /><button class="primary-action" :disabled="busy || project.status !== 'ready' || project.encoder !== 'open_clip'">{{ tr('Search', '搜索') }}</button></form>
         <div v-if="searchResults.length" class="content-heading"><div><p class="section-label">RESULTS</p><h2>{{ searchResults.length }} {{ tr('matches', '个匹配结果') }}</h2></div></div>
         <div class="asset-grid search-assets"><article v-for="result in searchResults" :key="result.photo_id"><img v-if="resultUrl(result)" :src="resultUrl(result)" :alt="result.photo_id" loading="lazy" /><div><strong>{{ Math.round(result.score * 100) }}% {{ tr('match', '匹配') }}</strong><span>{{ dateLabel(result.captured_at) }}</span></div></article></div>
       </section>
@@ -208,7 +242,7 @@ onMounted(loadPhotos)
         <template v-else>
           <div class="tool-heading"><p class="section-label">INSIGHTFACE CLUSTERS</p><h2>{{ tr('People who appear often', '照片里经常出现的人') }}</h2><p>{{ tr('Open a person to review their photos, set a name, and keep private notes.', '点击人物即可查看其全部照片、设置姓名并记录私人备注。') }}</p></div>
           <div v-if="!people.length" class="module-placeholder"><div class="large-symbol">●</div><div><h3>{{ tr('Run project-level people clustering', '运行项目级人物聚类') }}</h3><p>{{ tr('InsightFace analyzes faces locally. The first run may download a model; results stay within this project.', 'InsightFace 会在本机分析人脸。首次运行可能需要下载模型，结果只保存在当前项目。') }}</p></div><button class="primary-action" type="button" :disabled="busy || project.status !== 'ready'" @click="analyzePeople">{{ busy ? tr('Recognizing faces…', '正在识别人脸…') : tr('Analyze people', '开始人物分析') }}</button></div>
-          <div v-else class="people-result-grid"><article v-for="person in people" :key="person.id" role="button" tabindex="0" @click="openPerson(person)" @keydown.enter="openPerson(person)"><img v-if="person.cover_url" :src="mediaUrl(person.cover_url)" alt="Person representative" /><div v-else class="person-fallback">●</div><div><strong>{{ person.name || tr(`Person ${person.id + 1}`, `人物 ${person.id + 1}`) }}</strong><span>{{ person.photo_ids.length }} {{ tr('photos · View profile →', '张照片 · 查看人物 →') }}</span></div></article></div>
+          <template v-else><div class="content-heading"><div><p class="section-label">PEOPLE INDEX</p><h2>{{ people.length }} {{ tr('people groups', '个人物分组') }}</h2></div><button class="primary-action" type="button" :disabled="busy" @click="analyzePeople">{{ tr('Re-run analysis', '重新分析人物') }}</button></div><div class="people-result-grid"><article v-for="person in people" :key="person.id" role="button" tabindex="0" @click="openPerson(person)" @keydown.enter="openPerson(person)"><img v-if="person.cover_url" :src="mediaUrl(person.cover_url)" alt="Person representative" /><div v-else class="person-fallback">●</div><div><strong>{{ person.name || tr(`Person ${person.id + 1}`, `人物 ${person.id + 1}`) }}</strong><span>{{ person.photo_ids.length }} {{ tr('photos · View profile →', '张照片 · 查看人物 →') }}</span></div></article></div></template>
         </template>
       </section>
 

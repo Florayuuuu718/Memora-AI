@@ -60,16 +60,19 @@ export const api = {
     return result
   },
   analyze: (projectId: string) =>
-    request<{ project: PhotoProject }>(`/projects/${projectId}/analyze`, { method: 'POST' }),
+    request<{ project: PhotoProject }>(`/projects/${projectId}/analyze`, {
+      method: 'POST',
+      body: JSON.stringify({ encoder: 'open_clip' }),
+    }),
   photos: (projectId: string) =>
     request<{ photos: ProjectPhoto[] }>(`/projects/${projectId}/photos`),
   search: (projectId: string, query: string) =>
     request<SearchResponse>(`/projects/${projectId}/search`, {
       method: 'POST',
-      body: JSON.stringify({ query, top_k: 60, strategy: 'query_enhancement' }),
+      body: JSON.stringify({ query, top_k: 20, strategy: 'query_enhancement' }),
     }),
   events: (projectId: string) =>
-    request<{ events: EventItem[] }>(`/projects/${projectId}/events?strategy=time_clip_gps`),
+    request<{ events: EventItem[] }>(`/projects/${projectId}/events?strategy=strict_event_people`),
   journeys: (projectId: string) => request<{ journeys: JourneyItem[] }>(`/projects/${projectId}/journeys`),
   similar: (projectId: string) =>
     request<{ groups: SimilarGroup[] }>(`/projects/${projectId}/similar-groups`),
@@ -80,7 +83,7 @@ export const api = {
   clusterPeople: (projectId: string) =>
     request<{ groups: PersonGroup[] }>(`/projects/${projectId}/people/cluster`, {
       method: 'POST',
-      body: JSON.stringify({ model_name: 'buffalo_l', ctx_id: -1, eps: 0.35, min_samples: 2 }),
+      body: JSON.stringify({ model_name: 'buffalo_l', eps: 0.35, min_samples: 2 }),
     }),
   saveAnnotation: (projectId: string, kind: 'people' | 'events' | 'journeys', id: number, payload: { name?: string; note?: string; auto_generate_name?: boolean; auto_generate_note?: boolean }) =>
     request<{ annotation: { name: string | null; note: string | null } }>(`/projects/${projectId}/annotations/${kind}/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),

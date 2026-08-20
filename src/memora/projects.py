@@ -20,6 +20,8 @@ class PhotoProject:
     photo_count: int = 0
     analyzed_count: int = 0
     status: str = "empty"
+    encoder: str | None = None
+    embedding_dimension: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
